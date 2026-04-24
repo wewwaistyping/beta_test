@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.3.0-preview.4';
+const SLAY_VERSION = '4.3.0-preview.5';
 // 🧪 PREVIEW BUILD — isolated storage. Main 4.2.x settings & outfits are
 // untouched; preview keys (slay_wardrobe_preview, slay_image_gen_preview)
 // are seeded once from main on first run (see init at bottom of file).
@@ -1299,26 +1299,10 @@ const SLAY_VERSION = '4.3.0-preview.4';
     // Flag set when a mobile long-press triggered the preview popup, so the
     // subsequent click (synthesized from touchend) doesn't also open the
     // full wardrobe modal.
-    let swSuppressNextClick = false;
-    let swLongPressTimer = null;
     let swHoverShowTimer = null;
-    let swAutoCloseTimer = null;  // desktop only — dismiss after cursor leaves popup
+    let swAutoCloseTimer = null;  // dismiss timer after cursor leaves popup
     const SW_AUTOCLOSE_MS = 5000;
 
-    // ╔════════════════════════════════════════════════════════════════════╗
-    // ║  FEATURE FLAG: mobile preview+quickswap popup                      ║
-    // ╚════════════════════════════════════════════════════════════════════╝
-    // Mobile popup was buggy (position drift, partial gestures, iOS viewport
-    // quirks). Disabled per user UX decision 2026-04-24. Desktop hover popup
-    // fully functional. To re-enable mobile: flip this constant to true.
-    // All mobile-specific code is gated by this flag so nothing is wasted.
-    const SW_MOBILE_POPUP_ENABLED = false;
-    // Starting touch position for long-press movement tolerance. Fingers wobble
-    // more on touchscreens than you'd expect — 10px was too strict on iPhone
-    // (canceled before user even finished positioning). 20px is the standard
-    // used by iOS system long-press; stays open for real taps.
-    let swLongPressStartX = 0, swLongPressStartY = 0;
-    const SW_LONG_PRESS_MOVE_TOLERANCE = 20; // px
     // Persist last-used Quick-Swap tab across popup open/close + sessions.
     let swPreviewTab = (() => {
         try { return localStorage.getItem('slay_wardrobe_preview_tab') === 'bot' ? 'bot' : 'user'; }
@@ -1329,13 +1313,6 @@ const SLAY_VERSION = '4.3.0-preview.4';
         try { localStorage.setItem('slay_wardrobe_preview_tab', tab); } catch (e) { }
     }
 
-    // Unified touch-device check — one source of truth, used both for layout
-    // (bottom-sheet vs anchored popup) and behaviour (long-press vs hover).
-    // matchMedia is reactive to device orientation/mode changes.
-    function swIsTouch() {
-        return window.matchMedia?.('(hover: none) and (pointer: coarse)').matches
-            || window.innerWidth < 640;
-    }
 
     function swInjectFloatingBtn() {
         let $btn = $('#sw-bar-btn');
@@ -1350,65 +1327,21 @@ const SLAY_VERSION = '4.3.0-preview.4';
             //   - popup closes via X / outside click / Escape (enough ways)
             btnEl.addEventListener('click', (e) => {
                 e.preventDefault(); e.stopPropagation();
-                if (swSuppressNextClick) { swSuppressNextClick = false; return; }
                 clearTimeout(swHoverShowTimer);
                 swClosePreviewPopup();
                 swOpenModal();
             });
 
-            // ── Desktop hover: opens popup after 500ms intent debounce. Fast
+            // ── Hover: opens popup after 500ms intent debounce. Fast
             // click-intent users never see the popup; deliberate pause triggers.
-            // Guarded against synthesized mouseenter from taps on touch devices.
             btnEl.addEventListener('mouseenter', () => {
-                if (!SW_MOBILE_POPUP_ENABLED && swIsTouch()) return;
                 clearTimeout(swHoverShowTimer);
-                clearTimeout(swAutoCloseTimer);  // coming back to button cancels dismiss
+                clearTimeout(swAutoCloseTimer);
                 swHoverShowTimer = setTimeout(() => swOpenPreviewPopup(btnEl), 500);
             });
             btnEl.addEventListener('mouseleave', () => {
                 clearTimeout(swHoverShowTimer);
             });
-
-            // ── Mobile long-press handlers — gated by feature flag.
-            // Preserved code below binds touch events for long-press preview
-            // popup. Currently disabled (SW_MOBILE_POPUP_ENABLED=false), so
-            // mobile tap goes straight through to click handler → full wardrobe.
-            if (SW_MOBILE_POPUP_ENABLED) {
-                btnEl.addEventListener('touchstart', (e) => {
-                    clearTimeout(swLongPressTimer);
-                    const t = e.touches[0];
-                    swLongPressStartX = t?.clientX ?? 0;
-                    swLongPressStartY = t?.clientY ?? 0;
-                    swLongPressTimer = setTimeout(() => {
-                        swSuppressNextClick = true;
-                        try { document.activeElement?.blur?.(); } catch (e) { }
-                        swOpenPreviewPopup(btnEl);
-                    }, 400);
-                }, { passive: true });
-                btnEl.addEventListener('touchmove', (e) => {
-                    if (!swLongPressTimer) return;
-                    const t = e.touches[0];
-                    if (!t) return;
-                    const dx = t.clientX - swLongPressStartX;
-                    const dy = t.clientY - swLongPressStartY;
-                    if (dx * dx + dy * dy > SW_LONG_PRESS_MOVE_TOLERANCE * SW_LONG_PRESS_MOVE_TOLERANCE) {
-                        clearTimeout(swLongPressTimer);
-                        swLongPressTimer = null;
-                    }
-                }, { passive: true });
-                const cancelLongPress = () => {
-                    clearTimeout(swLongPressTimer);
-                    swLongPressTimer = null;
-                };
-                btnEl.addEventListener('touchend', cancelLongPress);
-                btnEl.addEventListener('touchcancel', cancelLongPress);
-                // iOS anti-callout / tap-delay suppression — only relevant
-                // when long-press popup is enabled.
-                btnEl.style.webkitTouchCallout = 'none';
-                btnEl.style.userSelect = 'none';
-                btnEl.style.webkitUserSelect = 'none';
-                btnEl.style.touchAction = 'manipulation';
-            }
 
             const $left = $('#leftSendForm');
             if ($left.length) $left.append($btn); else $('body').append($btn);
@@ -1448,9 +1381,7 @@ const SLAY_VERSION = '4.3.0-preview.4';
             //   1. click outside popup (but not on bar-btn — bar-btn handler owns that)
             //   2. X close button inside popup
             //   3. Escape key
-            //   4. swipe-down gesture (mobile only, bottom-sheet mode)
-            //   5. mouseleave for 3.5s (DESKTOP only — touch devices don't fire
-            //      mouseleave reliably, so auto-close is gated by !swIsTouch())
+            //   4. mouseleave for SW_AUTOCLOSE_MS (5s)
             document.addEventListener('click', (e) => {
                 if (!el.classList.contains('sw-pp-open')) return;
                 if (el.contains(e.target)) return;
@@ -1463,13 +1394,10 @@ const SLAY_VERSION = '4.3.0-preview.4';
                 }
             });
 
-            // ── Desktop-only auto-dismiss: cursor left the popup for
-            // SW_AUTOCLOSE_MS (3.5s) → close. Entering the popup cancels the
-            // timer. Touch devices (mobile/tablet) skip this: they don't fire
-            // mouseleave reliably on tap-out.
+            // ── Auto-dismiss: cursor left the popup for SW_AUTOCLOSE_MS → close.
+            // Entering the popup cancels the timer.
             el.addEventListener('mouseenter', () => clearTimeout(swAutoCloseTimer));
             el.addEventListener('mouseleave', () => {
-                if (swIsTouch()) return;
                 clearTimeout(swAutoCloseTimer);
                 swAutoCloseTimer = setTimeout(swClosePreviewPopup, SW_AUTOCLOSE_MS);
             });
@@ -1486,11 +1414,6 @@ const SLAY_VERSION = '4.3.0-preview.4';
             el.addEventListener('pointerup', stop);
             el.addEventListener('mousedown', stop);
 
-            // (Swipe-down-to-close was removed: its inline transform writes
-            // collided with the CSS slide-in animation, occasionally parking
-            // the popup off-screen on iOS. Close via X / tap-outside / Escape.
-            // If we want swipe-down back, implement with touch-action: pan-y
-            // and avoid touching .style.transform during the opening animation.)
         }
         return el;
     }
@@ -1501,7 +1424,6 @@ const SLAY_VERSION = '4.3.0-preview.4';
     function swRepositionPopup() {
         const el = document.getElementById('sw-preview-popup');
         if (!el || !el.classList.contains('sw-pp-open') || !swPopupAnchorRect) return;
-        if (el.classList.contains('sw-pp-mobile')) return; // mobile uses CSS-driven bottom-sheet
         const r = swPopupAnchorRect;
         el.style.visibility = 'hidden';
         el.style.left = '0px';
@@ -1522,18 +1444,11 @@ const SLAY_VERSION = '4.3.0-preview.4';
     }
 
     function swOpenPreviewPopup(anchor) {
-        // Hard kill-switch for mobile popup. Desktop unaffected.
-        if (!SW_MOBILE_POPUP_ENABLED && swIsTouch()) return;
         const el = swPreviewPopupEl();
         swRenderPreviewPopup();
         swPopupAnchorRect = anchor.getBoundingClientRect();
         el.classList.add('sw-pp-open');
-        el.classList.toggle('sw-pp-mobile', swIsTouch());
-        if (el.classList.contains('sw-pp-mobile')) {
-            el.style.left = el.style.top = el.style.right = el.style.bottom = '';
-        } else {
-            swRepositionPopup();
-        }
+        swRepositionPopup();
     }
 
     function swClosePreviewPopup() {
@@ -1678,33 +1593,6 @@ const SLAY_VERSION = '4.3.0-preview.4';
             }
         }
 
-        // ── Swipe between tabs (mobile only). Horizontal swipe on body area
-        // flips the Quick-Swap target figure.
-        if (swIsTouch()) swBindTabSwipe(el);
-    }
-
-    // Horizontal swipe inside popup body → toggle tab (user ⇄ bot).
-    // Only hooked on mobile; re-bound per render since body DOM is rebuilt.
-    function swBindTabSwipe(rootEl) {
-        const body = rootEl.querySelector('.sw-pp-body');
-        if (!body) return;
-        let sx = null, sy = null;
-        body.addEventListener('touchstart', (e) => {
-            sx = e.touches[0]?.clientX ?? null;
-            sy = e.touches[0]?.clientY ?? null;
-        }, { passive: true });
-        body.addEventListener('touchend', (e) => {
-            if (sx === null) return;
-            const t = e.changedTouches[0];
-            if (!t) return;
-            const dx = t.clientX - sx, dy = t.clientY - sy;
-            sx = sy = null;
-            // Horizontal-dominant swipe ≥60px → flip tab
-            if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.4) {
-                swSetPreviewTab(swPreviewTab === 'user' ? 'bot' : 'user');
-                swRenderPreviewPopup();
-            }
-        });
     }
 
     // Step-based navigation: tap a multi-outfit category → swap the main screen
@@ -1766,15 +1654,9 @@ const SLAY_VERSION = '4.3.0-preview.4';
     }
 
     // ── Peek (hold-to-zoom) ───────────────────────────────────────────────
-    // Desktop only: hover a sub-picker tile for 500ms → floating enlarged
-    // preview appears. Mouseleave → dismiss.
-    // Mobile: intentionally DISABLED (see user UX convo 2026-04-24) —
-    //   * long-press is already used to open the main popup,
-    //   * tiles are small so peek would sit under the finger anyway,
-    //   * tap = apply is the cleaner mobile pattern.
-    const swIsTouchDevice =
-        (window.matchMedia && window.matchMedia('(hover: none)').matches) ||
-        ('ontouchstart' in window && !window.matchMedia?.('(hover: hover)').matches);
+    // Hover a sub-picker tile for 500ms → floating enlarged preview appears.
+    // Mouseleave → dismiss. Only ever triggered from inside the desktop
+    // popup (mobile popup is disabled entirely), so no touch path needed.
 
     // Track all pending peek timers globally. Re-rendering the popup or
     // applying a swap detaches the old tiles but pending setTimeouts keep
@@ -1788,8 +1670,6 @@ const SLAY_VERSION = '4.3.0-preview.4';
     }
 
     function swBindPeek(tileEl) {
-        if (swIsTouchDevice) return; // mobile: skip peek entirely
-
         let hoverTimer = null;
         const showPeek = () => {
             swPeekTimers.delete(hoverTimer);

@@ -1909,41 +1909,6 @@
     transform: translateY(0);
     pointer-events: auto;
 }
-.sw-preview-popup.sw-pp-mobile {
-    /* Bottom-sheet on narrow screens. env(safe-area-inset-bottom) keeps the
-       sheet above the iPhone home-indicator area so it isn't half-hidden
-       behind the gesture strip.
-       No transform-based slide animation here — iOS Safari had issues with
-       transform clashing with other handlers and parking the popup offscreen.
-       Plain opacity fade is boring but bulletproof. */
-    left: 8px !important;
-    right: 8px !important;
-    top: auto !important;
-    bottom: max(8px, env(safe-area-inset-bottom, 8px)) !important;
-    width: auto !important;
-    max-width: none !important;
-    border-radius: 18px 18px 12px 12px;
-    transform: none !important;
-    transition: opacity 0.22s ease;
-}
-.sw-preview-popup.sw-pp-mobile.sw-pp-open {
-    transform: none !important;
-}
-/* Little grab handle hint at the top of the bottom-sheet — signals the
-   swipe-down-to-close gesture. */
-.sw-preview-popup.sw-pp-mobile::before {
-    content: '';
-    position: absolute;
-    top: 6px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 36px;
-    height: 4px;
-    border-radius: 2px;
-    background: rgba(255, 255, 255, 0.18);
-    pointer-events: none;
-    z-index: 2;
-}
 .sw-pp-close {
     position: absolute;
     top: 6px; right: 8px;
