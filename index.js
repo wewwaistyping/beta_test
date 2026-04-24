@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.3.0-preview.1';
+const SLAY_VERSION = '4.3.0-preview.2';
 // 🧪 PREVIEW BUILD — isolated storage. Main 4.2.x settings & outfits are
 // untouched; preview keys (slay_wardrobe_preview, slay_image_gen_preview)
 // are seeded once from main on first run (see init at bottom of file).
@@ -1061,7 +1061,7 @@ const SLAY_VERSION = '4.3.0-preview.1';
             const endpoint = (swS.describeEndpoint || iigSettings.endpoint || '').replace(/\/$/, '');
             const apiKey = swS.describeKey || iigSettings.apiKey || '';
             const modelSelect = document.getElementById('slay_sw_describe_model');
-            const model = modelSelect?.value || swS.describeModel || iigSettings.model || 'gemini-2.0-flash';
+            const model = modelSelect?.value || swS.describeModel || iigSettings.model || 'gemini-2.5-flash';
             if (!endpoint || !apiKey) {
                 toastr.warning('Настройте API для описания в секции Гардероб', 'Гардероб', { timeOut: 5000 });
                 return null;
@@ -1077,39 +1077,58 @@ const SLAY_VERSION = '4.3.0-preview.1';
             try {
                 let desc = null;
 
-                if (useGeminiFormat) {
-                    const url = `${endpoint}/v1beta/models/${model}:generateContent`;
-                    const body = {
-                        contents: [{
-                            role: 'user', parts: [
-                                { inlineData: { mimeType: 'image/png', data: base64 } },
-                                { text: describePrompt }
-                            ]
-                        }],
-                        generationConfig: { responseModalities: ['TEXT'], maxOutputTokens: maxTokens }
-                    };
-                    const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-                    if (!response.ok) throw new Error(`API ${response.status}`);
-                    const result = await response.json();
-                    desc = result.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim() || '';
-                } else {
-                    const url = `${endpoint}/v1/chat/completions`;
-                    const body = {
-                        model, max_tokens: maxTokens,
-                        messages: [
-                            { role: 'system', content: describePrompt },
-                            {
-                                role: 'user', content: [
-                                    { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
-                                    { type: 'text', text: 'Describe the clothing in this image.' }
+                // Retry on transient failures (429 rate-limit, 5xx) up to 2 times
+                // with short backoff. First upload of the session often hits 429
+                // on a "warm" Gemini key because previous chat completions bumped
+                // the shared per-minute quota.
+                const callApi = async () => {
+                    if (useGeminiFormat) {
+                        const url = `${endpoint}/v1beta/models/${model}:generateContent`;
+                        const body = {
+                            contents: [{
+                                role: 'user', parts: [
+                                    { inlineData: { mimeType: 'image/png', data: base64 } },
+                                    { text: describePrompt }
                                 ]
-                            }
-                        ]
-                    };
-                    const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-                    if (!response.ok) throw new Error(`API ${response.status}`);
-                    const result = await response.json();
-                    desc = result.choices?.[0]?.message?.content?.trim() || '';
+                            }],
+                            generationConfig: { responseModalities: ['TEXT'], maxOutputTokens: maxTokens }
+                        };
+                        const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                        if (!response.ok) { const err = new Error(`API ${response.status}`); err.status = response.status; throw err; }
+                        const result = await response.json();
+                        return result.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim() || '';
+                    } else {
+                        const url = `${endpoint}/v1/chat/completions`;
+                        const body = {
+                            model, max_tokens: maxTokens,
+                            messages: [
+                                { role: 'system', content: describePrompt },
+                                {
+                                    role: 'user', content: [
+                                        { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
+                                        { type: 'text', text: 'Describe the clothing in this image.' }
+                                    ]
+                                }
+                            ]
+                        };
+                        const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                        if (!response.ok) { const err = new Error(`API ${response.status}`); err.status = response.status; throw err; }
+                        const result = await response.json();
+                        return result.choices?.[0]?.message?.content?.trim() || '';
+                    }
+                };
+
+                const MAX_RETRIES = 2;
+                for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+                    try { desc = await callApi(); break; }
+                    catch (err) {
+                        const status = err.status || 0;
+                        const retryable = status === 429 || (status >= 500 && status < 600);
+                        if (!retryable || attempt === MAX_RETRIES) throw err;
+                        const delay = 800 * Math.pow(2, attempt); // 800ms, 1600ms
+                        swLog('WARN', `Describe API ${status}, retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms`);
+                        await new Promise(r => setTimeout(r, delay));
+                    }
                 }
 
                 if (desc) {
@@ -4273,7 +4292,7 @@ function createSettingsUI() {
                             <div class="flex-row" style="margin-top:6px;"><label>Формат API</label><select id="slay_sw_describe_api_format" class="flex1"><option value="auto" ${(swSettings.describeApiFormat || 'auto') === 'auto' ? 'selected' : ''}>Авто (по имени модели)</option><option value="gemini" ${swSettings.describeApiFormat === 'gemini' ? 'selected' : ''}>Gemini</option><option value="openai" ${swSettings.describeApiFormat === 'openai' ? 'selected' : ''}>OpenAI-compatible</option></select></div>
                             <div class="flex-row" style="margin-top:6px;"><label>Endpoint</label><input type="text" id="slay_sw_describe_endpoint" class="text_pole flex1" value="${sanitizeForHtml(swSettings.describeEndpoint || '')}" placeholder="Из основных настроек"></div>
                             <div class="flex-row" style="margin-top:6px;"><label>API Key</label><input type="password" id="slay_sw_describe_key" class="text_pole flex1" value="${sanitizeForHtml(swSettings.describeKey || '')}" placeholder="Из основных настроек"><div id="slay_sw_describe_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
-                            <div class="flex-row" style="margin-top:6px;"><label>Модель</label><select id="slay_sw_describe_model" class="flex1">${swSettings.describeModel ? `<option value="${sanitizeForHtml(swSettings.describeModel)}" selected>${sanitizeForHtml(swSettings.describeModel)}</option>` : '<option value="gemini-2.0-flash" selected>gemini-2.0-flash</option>'}</select><div id="slay_sw_describe_refresh" class="menu_button iig-refresh-btn" title="Обновить"><i class="fa-solid fa-sync"></i></div></div>
+                            <div class="flex-row" style="margin-top:6px;"><label>Модель</label><select id="slay_sw_describe_model" class="flex1">${swSettings.describeModel ? `<option value="${sanitizeForHtml(swSettings.describeModel)}" selected>${sanitizeForHtml(swSettings.describeModel)}</option>` : '<option value="gemini-2.5-flash" selected>gemini-2.5-flash</option>'}</select><div id="slay_sw_describe_refresh" class="menu_button iig-refresh-btn" title="Обновить"><i class="fa-solid fa-sync"></i></div></div>
                             <div id="slay_sw_describe_test" class="menu_button iig-test-connection" style="margin-top:8px;"><i class="fa-solid fa-wifi"></i> Тест</div>
                             <p class="hint" style="margin-top:4px;">Оставьте Endpoint и API Key пустыми — будут использованы из основных настроек. Или укажите свои для отдельного подключения.</p>
                         </div>
@@ -5304,10 +5323,10 @@ function bindSettingsEvents() {
             const data = await resp.json();
             const models = (data.data || []).map(m => m.id).sort();
             const sel = document.getElementById('slay_sw_describe_model');
-            const current = swS.describeModel || 'gemini-2.0-flash';
+            const current = swS.describeModel || 'gemini-2.5-flash';
             sel.innerHTML = '';
             for (const m of models) { const o = document.createElement('option'); o.value = m; o.textContent = m; o.selected = m === current; sel.appendChild(o); }
-            if (models.length === 0) sel.innerHTML = '<option value="gemini-2.0-flash">gemini-2.0-flash</option>';
+            if (models.length === 0) sel.innerHTML = '<option value="gemini-2.5-flash">gemini-2.5-flash</option>';
             toastr.success(`Найдено моделей: ${models.length}`, 'Гардероб');
         } catch (error) { toastr.error(`Ошибка: ${error.message}`, 'Гардероб'); }
         finally { btn.classList.remove('loading'); }
