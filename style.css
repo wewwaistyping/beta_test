@@ -1910,21 +1910,24 @@
     pointer-events: auto;
 }
 .sw-preview-popup.sw-pp-mobile {
-    /* Bottom-sheet on narrow screens */
+    /* Bottom-sheet on narrow screens. env(safe-area-inset-bottom) keeps the
+       sheet above the iPhone home-indicator area so it isn't half-hidden
+       behind the gesture strip.
+       No transform-based slide animation here — iOS Safari had issues with
+       transform clashing with other handlers and parking the popup offscreen.
+       Plain opacity fade is boring but bulletproof. */
     left: 8px !important;
     right: 8px !important;
     top: auto !important;
-    bottom: 8px !important;
+    bottom: max(8px, env(safe-area-inset-bottom, 8px)) !important;
     width: auto !important;
     max-width: none !important;
     border-radius: 18px 18px 12px 12px;
-    /* Native slide-up-from-bottom feel: initial offscreen, slide into view
-       when .sw-pp-open is added. Smoother than the generic desktop fade-slide. */
-    transform: translateY(100%);
-    transition: opacity 0.24s, transform 0.28s cubic-bezier(0.2, 0.9, 0.3, 1);
+    transform: none !important;
+    transition: opacity 0.22s ease;
 }
 .sw-preview-popup.sw-pp-mobile.sw-pp-open {
-    transform: translateY(0);
+    transform: none !important;
 }
 /* Little grab handle hint at the top of the bottom-sheet — signals the
    swipe-down-to-close gesture. */

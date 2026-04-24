@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.3.0-preview.2';
+const SLAY_VERSION = '4.3.0-preview.3';
 // 🧪 PREVIEW BUILD — isolated storage. Main 4.2.x settings & outfits are
 // untouched; preview keys (slay_wardrobe_preview, slay_image_gen_preview)
 // are seeded once from main on first run (see init at bottom of file).
@@ -1302,13 +1302,14 @@ const SLAY_VERSION = '4.3.0-preview.2';
     let swSuppressNextClick = false;
     let swLongPressTimer = null;
     let swHoverShowTimer = null;
-    let swAutoCloseTimer = null;  // desktop only — 3.5s dismiss after cursor leaves popup
-    const SW_AUTOCLOSE_MS = 3500;
+    let swAutoCloseTimer = null;  // desktop only — dismiss after cursor leaves popup
+    const SW_AUTOCLOSE_MS = 5000;
     // Starting touch position for long-press movement tolerance. Fingers wobble
-    // ±1-3px on touchstart even without intent to move — a zero-tolerance
-    // touchmove-cancel kills long-press almost every time. ≥10px == real drag.
+    // more on touchscreens than you'd expect — 10px was too strict on iPhone
+    // (canceled before user even finished positioning). 20px is the standard
+    // used by iOS system long-press; stays open for real taps.
     let swLongPressStartX = 0, swLongPressStartY = 0;
-    const SW_LONG_PRESS_MOVE_TOLERANCE = 10; // px
+    const SW_LONG_PRESS_MOVE_TOLERANCE = 20; // px
     // Persist last-used Quick-Swap tab across popup open/close + sessions.
     let swPreviewTab = (() => {
         try { return localStorage.getItem('slay_wardrobe_preview_tab') === 'bot' ? 'bot' : 'user'; }
@@ -1393,9 +1394,13 @@ const SLAY_VERSION = '4.3.0-preview.2';
             // iOS: long-press on icons inside a button triggers native callout
             // ("Save Image..."). Prevent via CSS. user-select also suppressed
             // so the long-press doesn't begin a text selection instead.
+            // touch-action: manipulation disables double-tap-to-zoom AND
+            // reduces iOS' 300ms tap delay — long-press detection is more
+            // reliable without Safari pre-processing the gesture.
             btnEl.style.webkitTouchCallout = 'none';
             btnEl.style.userSelect = 'none';
             btnEl.style.webkitUserSelect = 'none';
+            btnEl.style.touchAction = 'manipulation';
 
             const $left = $('#leftSendForm');
             if ($left.length) $left.append($btn); else $('body').append($btn);
@@ -1473,27 +1478,11 @@ const SLAY_VERSION = '4.3.0-preview.2';
             el.addEventListener('pointerup', stop);
             el.addEventListener('mousedown', stop);
 
-            // ── Swipe-down-to-close (mobile bottom-sheet only).
-            // Track vertical distance from first touchstart to touchmove; if
-            // user drags down > 60px release → close. Small drag/release is ignored.
-            let swipeStartY = null, swipeDy = 0;
-            el.addEventListener('touchstart', (e) => {
-                if (!el.classList.contains('sw-pp-mobile')) return;
-                swipeStartY = e.touches[0]?.clientY ?? null;
-                swipeDy = 0;
-            }, { passive: true });
-            el.addEventListener('touchmove', (e) => {
-                if (swipeStartY === null) return;
-                swipeDy = (e.touches[0]?.clientY ?? swipeStartY) - swipeStartY;
-                // Apply a small visual follow-drag so the gesture feels live
-                if (swipeDy > 0) el.style.transform = `translateY(${Math.min(swipeDy, 120)}px)`;
-            }, { passive: true });
-            el.addEventListener('touchend', () => {
-                if (swipeStartY === null) return;
-                if (swipeDy > 60) swClosePreviewPopup();
-                el.style.transform = '';
-                swipeStartY = null;
-            });
+            // (Swipe-down-to-close was removed: its inline transform writes
+            // collided with the CSS slide-in animation, occasionally parking
+            // the popup off-screen on iOS. Close via X / tap-outside / Escape.
+            // If we want swipe-down back, implement with touch-action: pan-y
+            // and avoid touching .style.transform during the opening animation.)
         }
         return el;
     }
