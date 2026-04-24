@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.3.0-preview.3';
+const SLAY_VERSION = '4.3.0-preview.4';
 // 🧪 PREVIEW BUILD — isolated storage. Main 4.2.x settings & outfits are
 // untouched; preview keys (slay_wardrobe_preview, slay_image_gen_preview)
 // are seeded once from main on first run (see init at bottom of file).
@@ -1304,6 +1304,15 @@ const SLAY_VERSION = '4.3.0-preview.3';
     let swHoverShowTimer = null;
     let swAutoCloseTimer = null;  // desktop only — dismiss after cursor leaves popup
     const SW_AUTOCLOSE_MS = 5000;
+
+    // ╔════════════════════════════════════════════════════════════════════╗
+    // ║  FEATURE FLAG: mobile preview+quickswap popup                      ║
+    // ╚════════════════════════════════════════════════════════════════════╝
+    // Mobile popup was buggy (position drift, partial gestures, iOS viewport
+    // quirks). Disabled per user UX decision 2026-04-24. Desktop hover popup
+    // fully functional. To re-enable mobile: flip this constant to true.
+    // All mobile-specific code is gated by this flag so nothing is wasted.
+    const SW_MOBILE_POPUP_ENABLED = false;
     // Starting touch position for long-press movement tolerance. Fingers wobble
     // more on touchscreens than you'd expect — 10px was too strict on iPhone
     // (canceled before user even finished positioning). 20px is the standard
@@ -1349,7 +1358,9 @@ const SLAY_VERSION = '4.3.0-preview.3';
 
             // ── Desktop hover: opens popup after 500ms intent debounce. Fast
             // click-intent users never see the popup; deliberate pause triggers.
+            // Guarded against synthesized mouseenter from taps on touch devices.
             btnEl.addEventListener('mouseenter', () => {
+                if (!SW_MOBILE_POPUP_ENABLED && swIsTouch()) return;
                 clearTimeout(swHoverShowTimer);
                 clearTimeout(swAutoCloseTimer);  // coming back to button cancels dismiss
                 swHoverShowTimer = setTimeout(() => swOpenPreviewPopup(btnEl), 500);
@@ -1358,49 +1369,46 @@ const SLAY_VERSION = '4.3.0-preview.3';
                 clearTimeout(swHoverShowTimer);
             });
 
-            // ── Mobile long-press (~400ms) with movement tolerance ──
-            // Finger micro-wobble must NOT cancel long-press. Only a real drag
-            // > SW_LONG_PRESS_MOVE_TOLERANCE aborts.
-            btnEl.addEventListener('touchstart', (e) => {
-                clearTimeout(swLongPressTimer);
-                const t = e.touches[0];
-                swLongPressStartX = t?.clientX ?? 0;
-                swLongPressStartY = t?.clientY ?? 0;
-                swLongPressTimer = setTimeout(() => {
-                    swSuppressNextClick = true;
-                    // Mobile: dismiss the on-screen keyboard if textarea focused,
-                    // otherwise popup can be half-hidden behind it.
-                    try { document.activeElement?.blur?.(); } catch (e) { }
-                    swOpenPreviewPopup(btnEl);
-                }, 400);
-            }, { passive: true });
-            btnEl.addEventListener('touchmove', (e) => {
-                if (!swLongPressTimer) return;
-                const t = e.touches[0];
-                if (!t) return;
-                const dx = t.clientX - swLongPressStartX;
-                const dy = t.clientY - swLongPressStartY;
-                if (dx * dx + dy * dy > SW_LONG_PRESS_MOVE_TOLERANCE * SW_LONG_PRESS_MOVE_TOLERANCE) {
+            // ── Mobile long-press handlers — gated by feature flag.
+            // Preserved code below binds touch events for long-press preview
+            // popup. Currently disabled (SW_MOBILE_POPUP_ENABLED=false), so
+            // mobile tap goes straight through to click handler → full wardrobe.
+            if (SW_MOBILE_POPUP_ENABLED) {
+                btnEl.addEventListener('touchstart', (e) => {
+                    clearTimeout(swLongPressTimer);
+                    const t = e.touches[0];
+                    swLongPressStartX = t?.clientX ?? 0;
+                    swLongPressStartY = t?.clientY ?? 0;
+                    swLongPressTimer = setTimeout(() => {
+                        swSuppressNextClick = true;
+                        try { document.activeElement?.blur?.(); } catch (e) { }
+                        swOpenPreviewPopup(btnEl);
+                    }, 400);
+                }, { passive: true });
+                btnEl.addEventListener('touchmove', (e) => {
+                    if (!swLongPressTimer) return;
+                    const t = e.touches[0];
+                    if (!t) return;
+                    const dx = t.clientX - swLongPressStartX;
+                    const dy = t.clientY - swLongPressStartY;
+                    if (dx * dx + dy * dy > SW_LONG_PRESS_MOVE_TOLERANCE * SW_LONG_PRESS_MOVE_TOLERANCE) {
+                        clearTimeout(swLongPressTimer);
+                        swLongPressTimer = null;
+                    }
+                }, { passive: true });
+                const cancelLongPress = () => {
                     clearTimeout(swLongPressTimer);
                     swLongPressTimer = null;
-                }
-            }, { passive: true });
-            const cancelLongPress = () => {
-                clearTimeout(swLongPressTimer);
-                swLongPressTimer = null;
-            };
-            btnEl.addEventListener('touchend', cancelLongPress);
-            btnEl.addEventListener('touchcancel', cancelLongPress);
-            // iOS: long-press on icons inside a button triggers native callout
-            // ("Save Image..."). Prevent via CSS. user-select also suppressed
-            // so the long-press doesn't begin a text selection instead.
-            // touch-action: manipulation disables double-tap-to-zoom AND
-            // reduces iOS' 300ms tap delay — long-press detection is more
-            // reliable without Safari pre-processing the gesture.
-            btnEl.style.webkitTouchCallout = 'none';
-            btnEl.style.userSelect = 'none';
-            btnEl.style.webkitUserSelect = 'none';
-            btnEl.style.touchAction = 'manipulation';
+                };
+                btnEl.addEventListener('touchend', cancelLongPress);
+                btnEl.addEventListener('touchcancel', cancelLongPress);
+                // iOS anti-callout / tap-delay suppression — only relevant
+                // when long-press popup is enabled.
+                btnEl.style.webkitTouchCallout = 'none';
+                btnEl.style.userSelect = 'none';
+                btnEl.style.webkitUserSelect = 'none';
+                btnEl.style.touchAction = 'manipulation';
+            }
 
             const $left = $('#leftSendForm');
             if ($left.length) $left.append($btn); else $('body').append($btn);
@@ -1514,6 +1522,8 @@ const SLAY_VERSION = '4.3.0-preview.3';
     }
 
     function swOpenPreviewPopup(anchor) {
+        // Hard kill-switch for mobile popup. Desktop unaffected.
+        if (!SW_MOBILE_POPUP_ENABLED && swIsTouch()) return;
         const el = swPreviewPopupEl();
         swRenderPreviewPopup();
         swPopupAnchorRect = anchor.getBoundingClientRect();
