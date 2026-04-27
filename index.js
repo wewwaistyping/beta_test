@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.3.0-preview.6';
+const SLAY_VERSION = '4.3.0-preview.7';
 // 🧪 PREVIEW BUILD — isolated storage. Main 4.2.x settings & outfits are
 // untouched; preview keys (slay_wardrobe_preview, slay_image_gen_preview)
 // are seeded once from main on first run (see init at bottom of file).
@@ -2601,63 +2601,11 @@ async function loadRefImageAsBase64(path) {
     } catch (e) { iigLog('WARN', `loadRefImageAsBase64 failed for ${path}:`, e.message); return null; }
 }
 
-// ── Avatar helpers (from sillyimages-master) ──
-async function getCharacterAvatarBase64() {
-    try {
-        const context = SillyTavern.getContext();
-        if (context.characterId === undefined || context.characterId === null) return null;
-        if (typeof context.getCharacterAvatar === 'function') {
-            const avatarUrl = context.getCharacterAvatar(context.characterId);
-            if (avatarUrl) return await imageUrlToBase64(avatarUrl);
-        }
-        const character = context.characters?.[context.characterId];
-        if (character?.avatar) return await imageUrlToBase64(`/characters/${encodeURIComponent(character.avatar)}`);
-        return null;
-    } catch (error) { console.error('[IIG] getCharacterAvatarBase64 error:', error); return null; }
-}
-
-async function getCharacterAvatarDataUrl() {
-    try {
-        const context = SillyTavern.getContext();
-        if (context.characterId === undefined || context.characterId === null) return null;
-        if (typeof context.getCharacterAvatar === 'function') {
-            const avatarUrl = context.getCharacterAvatar(context.characterId);
-            if (avatarUrl) return await imageUrlToDataUrl(avatarUrl);
-        }
-        const character = context.characters?.[context.characterId];
-        if (character?.avatar) return await imageUrlToDataUrl(`/characters/${encodeURIComponent(character.avatar)}`);
-        return null;
-    } catch (error) { console.error('[IIG] getCharacterAvatarDataUrl error:', error); return null; }
-}
-
-async function getUserAvatarBase64() {
-    try {
-        const context = SillyTavern.getContext();
-        const settings = getSettings();
-        const currentAvatar = context.user_avatar;
-        if (currentAvatar) {
-            const b64 = await imageUrlToBase64(`/User Avatars/${encodeURIComponent(currentAvatar)}`);
-            if (b64) return b64;
-        }
-        const userMsgAvatar = document.querySelector('#chat .mes[is_user="true"] .avatar img');
-        if (userMsgAvatar?.src) { const b64 = await imageUrlToBase64(userMsgAvatar.src); if (b64) return b64; }
-        if (settings.userAvatarFile) return await imageUrlToBase64(`/User Avatars/${encodeURIComponent(settings.userAvatarFile)}`);
-        return null;
-    } catch (error) { console.error('[IIG] getUserAvatarBase64 error:', error); return null; }
-}
-
-async function getUserAvatarDataUrl() {
-    try {
-        const context = SillyTavern.getContext();
-        const settings = getSettings();
-        const currentAvatar = context.user_avatar;
-        if (currentAvatar) { const d = await imageUrlToDataUrl(`/User Avatars/${encodeURIComponent(currentAvatar)}`); if (d) return d; }
-        const userMsgAvatar = document.querySelector('#chat .mes[is_user="true"] .avatar img');
-        if (userMsgAvatar?.src) { const d = await imageUrlToDataUrl(userMsgAvatar.src); if (d) return d; }
-        if (settings.userAvatarFile) return await imageUrlToDataUrl(`/User Avatars/${encodeURIComponent(settings.userAvatarFile)}`);
-        return null;
-    } catch (error) { console.error('[IIG] getUserAvatarDataUrl error:', error); return null; }
-}
+// (Removed in 4.2.4: getCharacterAvatarBase64 / getUserAvatarBase64 / their
+// DataUrl variants. Used to be the silent fallback when ref slots were empty
+// — that "feature" surprised users into seeing refs sent when they thought
+// everything was off. Now: empty slot = nothing sent. If the user wants their
+// character avatar as a ref, they upload it manually into the char slot.)
 
 function hasManualReference(ref) {
     return Boolean(ref?.imagePath || ref?.imageBase64 || ref?.imageData);
@@ -4067,17 +4015,23 @@ function renderRefSlots() {
         else thumb.src = '';
         if (wrap) wrap.classList.toggle('has-image', !!(ref?.imagePath || ref?.imageBase64 || ref?.imageData));
     };
+    // Don't clobber a name input that the user is currently typing in.
+    const setNameInput = (input, value) => {
+        if (!input) return;
+        if (document.activeElement === input) return;
+        input.value = value || '';
+    };
     const charSlot = document.querySelector('.iig-ref-slot[data-ref-type="char"]');
     if (charSlot) {
         setThumb(charSlot, settings.charRef);
-        charSlot.querySelector('.iig-ref-name').value = settings.charRef?.name || '';
+        setNameInput(charSlot.querySelector('.iig-ref-name'), settings.charRef?.name);
         const label = charSlot.querySelector('.iig-ref-label');
         if (label) label.textContent = charDisplayName;
     }
     const userSlot = document.querySelector('.iig-ref-slot[data-ref-type="user"]');
     if (userSlot) {
         setThumb(userSlot, settings.userRef);
-        userSlot.querySelector('.iig-ref-name').value = settings.userRef?.name || '';
+        setNameInput(userSlot.querySelector('.iig-ref-name'), settings.userRef?.name);
         const label = userSlot.querySelector('.iig-ref-label');
         if (label) label.textContent = userDisplayName;
     }
@@ -4086,8 +4040,14 @@ function renderRefSlots() {
         if (!slot) continue;
         const npc = settings.npcReferences[i] || null;
         setThumb(slot, npc);
-        slot.querySelector('.iig-ref-name').value = npc?.name || '';
+        setNameInput(slot.querySelector('.iig-ref-name'), npc?.name);
     }
+}
+
+let _renderRefSlotsDebounce = null;
+function renderRefSlotsDebounced() {
+    clearTimeout(_renderRefSlotsDebounce);
+    _renderRefSlotsDebounce = setTimeout(renderRefSlots, 200);
 }
 
 function createSettingsUI() {
@@ -5410,13 +5370,41 @@ function updateHeaderStatusDot() {
         }, 300);
     });
 
+    // Persona switch (and many other settings changes) emits SETTINGS_UPDATED.
+    // Use it to refresh ref-slot labels — the {{user}} title needs to follow
+    // whichever persona is currently active. Debounced so a burst of settings
+    // saves rerenders only once.
+    if (context.event_types.SETTINGS_UPDATED) {
+        context.eventSource.on(context.event_types.SETTINGS_UPDATED, () => {
+            renderRefSlotsDebounced();
+        });
+    }
+
     context.eventSource.makeLast(context.event_types.CHARACTER_MESSAGE_RENDERED, async (messageId) => {
         await onMessageReceived(messageId);
-        // After processing, attach regen buttons to any pre-existing images in THIS message
-        // (covers swipes, edits, reloaded messages)
         const mesEl = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
         if (mesEl) attachRegenButtonsInRoot(mesEl);
     });
+
+    // Explicit re-bind on message edit. ST replaces .mes_text innerHTML when
+    // the user saves an edit; the new <img> needs a fresh regen button. We
+    // used to rely solely on MutationObserver but it occasionally missed the
+    // mutation depending on how ST patched the DOM, leaving the img buttonless.
+    const REBIND_EDIT_EVENTS = [
+        'MESSAGE_UPDATED', 'MESSAGE_EDITED', 'MESSAGE_RECEIVED', 'MESSAGE_SWIPED',
+    ];
+    for (const evName of REBIND_EDIT_EVENTS) {
+        const evType = context.event_types?.[evName];
+        if (!evType) continue;
+        context.eventSource.on(evType, (messageId) => {
+            setTimeout(() => {
+                const mesEl = (Number.isInteger(messageId))
+                    ? document.querySelector(`#chat .mes[mesid="${messageId}"]`)
+                    : null;
+                attachRegenButtonsInRoot(mesEl || document.getElementById('chat') || document.body);
+            }, 50);
+        });
+    }
 
     iigLog('INFO', 'Slay Images initialized');
 })();
