@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.3.0-preview.5';
+const SLAY_VERSION = '4.3.0-preview.6';
 // 🧪 PREVIEW BUILD — isolated storage. Main 4.2.x settings & outfits are
 // untouched; preview keys (slay_wardrobe_preview, slay_image_gen_preview)
 // are seeded once from main on first run (see init at bottom of file).
@@ -1341,6 +1341,16 @@ const SLAY_VERSION = '4.3.0-preview.5';
             });
             btnEl.addEventListener('mouseleave', () => {
                 clearTimeout(swHoverShowTimer);
+                // If popup is currently open, restart the auto-close countdown
+                // when cursor leaves the bar button. Without this, a user who
+                // moved popup→button→away would stall the popup open forever
+                // (popup mouseleave already fired before they reached button,
+                // then button mouseenter cancelled the timer).
+                const pp = document.getElementById('sw-preview-popup');
+                if (pp?.classList.contains('sw-pp-open') && !pp.matches(':hover')) {
+                    clearTimeout(swAutoCloseTimer);
+                    swAutoCloseTimer = setTimeout(swClosePreviewPopup, SW_AUTOCLOSE_MS);
+                }
             });
 
             const $left = $('#leftSendForm');
@@ -2653,40 +2663,42 @@ function hasManualReference(ref) {
     return Boolean(ref?.imagePath || ref?.imageBase64 || ref?.imageData);
 }
 
+// Empty slot = no ref. Used to silently fall back to ST character/user avatar
+// which violated the "empty slot means nothing is sent" expectation. Now strict:
+// slot needs an actual uploaded image (imagePath/imageBase64/imageData). If
+// empty → return null, even when char/user is named in the prompt.
 async function getPreferredCharacterReferenceBase64(refs, settings) {
     if (!settings.sendCharAvatar) return null;
-    if (hasManualReference(refs?.charRef)) {
-        const manual = refs.charRef.imagePath ? await loadRefImageAsBase64(refs.charRef.imagePath) : (refs.charRef.imageBase64 || refs.charRef.imageData || null);
-        if (manual) return manual;
-    }
-    return await getCharacterAvatarBase64();
+    if (!hasManualReference(refs?.charRef)) return null;
+    return refs.charRef.imagePath
+        ? await loadRefImageAsBase64(refs.charRef.imagePath)
+        : (refs.charRef.imageBase64 || refs.charRef.imageData || null);
 }
 
 async function getPreferredUserReferenceBase64(refs, settings) {
     if (!settings.sendUserAvatar) return null;
-    if (hasManualReference(refs?.userRef)) {
-        const manual = refs.userRef.imagePath ? await loadRefImageAsBase64(refs.userRef.imagePath) : (refs.userRef.imageBase64 || refs.userRef.imageData || null);
-        if (manual) return manual;
-    }
-    return await getUserAvatarBase64();
+    if (!hasManualReference(refs?.userRef)) return null;
+    return refs.userRef.imagePath
+        ? await loadRefImageAsBase64(refs.userRef.imagePath)
+        : (refs.userRef.imageBase64 || refs.userRef.imageData || null);
 }
 
 async function getPreferredCharacterReferenceDataUrl(refs, settings) {
     if (!settings.sendCharAvatar) return null;
-    if (hasManualReference(refs?.charRef)) {
-        const manual = refs.charRef.imagePath ? await loadRefImageAsBase64(refs.charRef.imagePath) : (refs.charRef.imageBase64 || refs.charRef.imageData || null);
-        if (manual) return `data:image/jpeg;base64,${manual}`;
-    }
-    return await getCharacterAvatarDataUrl();
+    if (!hasManualReference(refs?.charRef)) return null;
+    const manual = refs.charRef.imagePath
+        ? await loadRefImageAsBase64(refs.charRef.imagePath)
+        : (refs.charRef.imageBase64 || refs.charRef.imageData || null);
+    return manual ? `data:image/jpeg;base64,${manual}` : null;
 }
 
 async function getPreferredUserReferenceDataUrl(refs, settings) {
     if (!settings.sendUserAvatar) return null;
-    if (hasManualReference(refs?.userRef)) {
-        const manual = refs.userRef.imagePath ? await loadRefImageAsBase64(refs.userRef.imagePath) : (refs.userRef.imageBase64 || refs.userRef.imageData || null);
-        if (manual) return `data:image/jpeg;base64,${manual}`;
-    }
-    return await getUserAvatarDataUrl();
+    if (!hasManualReference(refs?.userRef)) return null;
+    const manual = refs.userRef.imagePath
+        ? await loadRefImageAsBase64(refs.userRef.imagePath)
+        : (refs.userRef.imageBase64 || refs.userRef.imageData || null);
+    return manual ? `data:image/jpeg;base64,${manual}` : null;
 }
 
 async function fetchUserAvatars() {
