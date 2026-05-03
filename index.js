@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.3.0-preview.7';
+const SLAY_VERSION = '4.3.0-preview.8';
 // 🧪 PREVIEW BUILD — isolated storage. Main 4.2.x settings & outfits are
 // untouched; preview keys (slay_wardrobe_preview, slay_image_gen_preview)
 // are seeded once from main on first run (see init at bottom of file).
@@ -3195,8 +3195,14 @@ function attachRegenButton(imgEl) {
                 liveImg.src = newImagePath;
                 if (message && origSrcAttr) {
                     const replaced = replaceImageSrcEverywhere(message, origSrcAttr, newImagePath);
-                    if (replaced) ctx.saveChatDebounced?.();
-                    else iigLog('WARN', `Regen: could not find origSrc "${origSrcAttr.slice(0, 60)}" in message fields — src updated in DOM only, may revert on reload`);
+                    if (replaced) {
+                        // FORCE save (not debounced). If the user reloads the chat
+                        // before the debounce fires (~5s), message.mes still has
+                        // the OLD src and the previous image silently re-appears.
+                        // Same bug fixed in retryFailedGeneration in 4.1.6 — this
+                        // is the regular-regen-success twin we missed.
+                        try { await ctx.saveChat?.(); } catch (e) { ctx.saveChatDebounced?.(); }
+                    } else iigLog('WARN', `Regen: could not find origSrc "${origSrcAttr.slice(0, 60)}" in message fields — src updated in DOM only, may revert on reload`);
                 }
                 toastr.success('Картинка перегенерирована', 'SLAY Images', { timeOut: 2000 });
             } else {
@@ -3475,7 +3481,12 @@ async function generateImageWithRetry(prompt, style, onStatusUpdate, options = {
             let generated;
             if (settings.apiType === 'naistera') {
                 generated = await generateImageNaistera(prompt, style, { ...options, referenceImages: referenceDataUrls, referenceLabels: naisteraRefLabels, videoTestMode: enableVideoTest, videoEveryN: settings.naisteraVideoEveryN });
-            } else if (settings.apiType === 'gemini' || isGeminiModel(settings.model)) {
+            } else if (settings.apiType === 'gemini') {
+                // Strictly user's choice — don't auto-route via isGeminiModel().
+                // Some OpenAI-compat routers (llmrouter, openrouter) host Gemini
+                // models behind /v1/chat/completions, NOT /v1beta. Overriding by
+                // model name 404s on those routers despite the user explicitly
+                // picking OpenAI-compatible.
                 generated = await generateImageGemini(prompt, style, referenceImages, { ...options, refLabels, refNames });
             } else {
                 generated = await generateImageOpenAI(prompt, style, referenceImages, { ...options, refLabels, refNames });
@@ -5058,7 +5069,13 @@ function bindSettingsEvents() {
         const input = document.getElementById('slay_api_key'); const icon = document.querySelector('#slay_key_toggle i');
         if (input.type === 'password') { input.type = 'text'; icon.classList.replace('fa-eye', 'fa-eye-slash'); } else { input.type = 'password'; icon.classList.replace('fa-eye-slash', 'fa-eye'); }
     });
-    document.getElementById('slay_model')?.addEventListener('change', (e) => { settings.model = e.target.value; saveSettings(); if (isGeminiModel(e.target.value)) { document.getElementById('slay_api_type').value = 'gemini'; settings.apiType = 'gemini'; updateVisibility(); } });
+    // Just save the model name. Don't auto-flip apiType based on model name —
+    // OpenAI-compat routers expose Gemini models too, and user's explicit
+    // apiType choice should be respected.
+    document.getElementById('slay_model')?.addEventListener('change', (e) => {
+        settings.model = e.target.value;
+        saveSettings();
+    });
     document.getElementById('slay_refresh_models')?.addEventListener('click', async (e) => {
         const btn = e.currentTarget; btn.classList.add('loading');
         try { const models = await fetchModels(); const sel = document.getElementById('slay_model'); sel.innerHTML = '<option value="">-- Выберите --</option>'; for (const m of models) { const o = document.createElement('option'); o.value = m; o.textContent = m; o.selected = m === settings.model; sel.appendChild(o); } toastr.success(`Моделей: ${models.length}`, 'SLAY Images'); }

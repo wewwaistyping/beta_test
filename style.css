@@ -424,14 +424,30 @@
 
 /* ── Regenerate button overlay on generated images ── */
 .iig-img-wrap {
+    /* The wrap MUST be exactly as big as its child image — no more, no less.
+       Bots often template the img with `style="width:100%"` inside an outer
+       `<div style="display:table;width:fit-content">`. Our span inserted in
+       between creates a circular sizing chain (table sizes to span, span
+       sizes to img, img wants 100% of span). After ST re-renders an edited
+       message, browsers can land on a slightly off layout — wrap a few px
+       wider/narrower than the visible image, leaving a visible "broken
+       frame" mismatch.
+       Forcing display:block + width:fit-content breaks the circular chain
+       and lets the wrap settle on the img's intrinsic width every time. */
     position: relative;
-    display: inline-block;
+    display: block;
+    width: fit-content;
     max-width: 100%;
+    box-sizing: border-box;
     line-height: 0;
 }
 .iig-img-wrap > img,
 .iig-img-wrap > .iig-generated-image {
     display: block;
+    /* !important to defeat inline `style="width:100%"` from bot templates,
+       which would otherwise compute width against the wrap (now fit-content)
+       and reintroduce the circular dependency. */
+    width: auto !important;
     max-width: 100%;
     height: auto;
     transition: opacity .2s;
