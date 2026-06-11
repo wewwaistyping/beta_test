@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.3.0-preview.17';
+const SLAY_VERSION = '4.3.0-preview.18';
 // 🧪 PREVIEW BUILD — isolated storage. Main 4.2.x settings & outfits are
 // untouched; preview keys (slay_wardrobe_preview, slay_image_gen_preview)
 // are seeded once from main on first run (see init at bottom of file).
@@ -1058,7 +1058,7 @@ const SLAY_VERSION = '4.3.0-preview.17';
         // ── Direct API mode (recommended) ──
         if (mode === 'direct') {
             const iigSettings = SillyTavern.getContext().extensionSettings[MODULE_NAME] || {};
-            const endpoint = (swS.describeEndpoint || iigSettings.endpoint || '').replace(/\/$/, '');
+            const endpoint = normalizeApiEndpoint(swS.describeEndpoint || iigSettings.endpoint || '');
             const apiKey = swS.describeKey || iigSettings.apiKey || '';
             const modelSelect = document.getElementById('slay_sw_describe_model');
             const model = modelSelect?.value || swS.describeModel || iigSettings.model || 'gemini-2.5-flash';
@@ -1093,7 +1093,7 @@ const SLAY_VERSION = '4.3.0-preview.17';
                             }],
                             generationConfig: { responseModalities: ['TEXT'], maxOutputTokens: maxTokens }
                         };
-                        const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                        const response = await fetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
                         if (!response.ok) { const err = new Error(`API ${response.status}`); err.status = response.status; throw err; }
                         const result = await response.json();
                         return result.candidates?.[0]?.content?.parts?.find(p => p.text)?.text?.trim() || '';
@@ -1111,7 +1111,7 @@ const SLAY_VERSION = '4.3.0-preview.17';
                                 }
                             ]
                         };
-                        const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                        const response = await fetch(url, { method: 'POST', headers: buildAuthHeaders(apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
                         if (!response.ok) { const err = new Error(`API ${response.status}`); err.status = response.status; throw err; }
                         const result = await response.json();
                         return result.choices?.[0]?.message?.content?.trim() || '';
@@ -1972,6 +1972,10 @@ const defaultSettings = Object.freeze({
     endpoint: '',
     apiKey: '',
     model: '',
+    // Saved connection profiles: [{name, apiType, endpoint, apiKey, model}].
+    // Applying a profile copies its fields into the live settings — it's a
+    // snapshot, not a live link; later edits don't write back to the profile.
+    connectionProfiles: [],
     size: '1024x1024',
     quality: 'standard',
     maxRetries: 0,
@@ -2720,9 +2724,41 @@ async function fetchUserAvatars() {
     } catch (error) { console.error('[IIG] fetchUserAvatars failed:', error); return []; }
 }
 
+// Normalize an API endpoint to its BASE url: trim, drop trailing slash(es),
+// drop trailing /v1 or /v1beta. Users routinely paste endpoints from provider
+// docs WITH the version segment (https://ellyai.pro/v1, https://openrouter.ai/api/v1)
+// — our code then appends /v1/chat/completions and lands on /v1/v1/... →
+// 404/405 without CORS headers → browser shows "Failed to fetch".
+function normalizeApiEndpoint(raw) {
+    if (!raw) return '';
+    return String(raw).trim()
+        .replace(/\/+$/, '')
+        .replace(/\/v1(beta)?$/i, '')
+        .replace(/\/+$/, '');
+}
+
+// Strip invisible unicode + whitespace that riders in from clipboard (Telegram
+// loves zero-width spaces). HTTP headers are ISO-8859-1 only — one stray
+// cyrillic letter or U+200B in the key makes fetch throw a cryptic
+// "String contains non ISO-8859-1 code point" before the request even leaves.
+function sanitizeApiKey(raw) {
+    return String(raw || '').replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '').trim();
+}
+
+// Build Authorization headers, failing EARLY with a human-readable error if
+// the key still contains non-ASCII garbage after sanitization.
+function buildAuthHeaders(apiKey, extra = {}) {
+    const key = sanitizeApiKey(apiKey);
+    if (!key) throw new Error('API Key не задан');
+    if (!/^[\x20-\x7E]+$/.test(key)) {
+        throw new Error('API Key содержит недопустимые символы (кириллица или невидимый юникод из буфера обмена). Очистите поле и вставьте ключ заново.');
+    }
+    return { 'Authorization': `Bearer ${key}`, ...extra };
+}
+
 async function fetchModels() {
     const settings = getSettings();
-    const endpoint = settings.endpoint ? settings.endpoint.replace(/\/$/, '') : getEffectiveEndpoint(settings);
+    const endpoint = settings.endpoint ? normalizeApiEndpoint(settings.endpoint) : getEffectiveEndpoint(settings);
     if (!endpoint || !settings.apiKey) {
         console.warn('[IIG] Cannot fetch models: endpoint=' + endpoint + ' apiKey=' + (settings.apiKey ? 'set' : 'empty'));
         toastr.warning('Укажите endpoint и API key', 'SLAY Images');
@@ -2730,7 +2766,7 @@ async function fetchModels() {
     }
     const url = `${endpoint}/v1/models`;
     try {
-        const response = await fetch(url, { method: 'GET', headers: { 'Authorization': `Bearer ${settings.apiKey}` } });
+        const response = await fetch(url, { method: 'GET', headers: buildAuthHeaders(settings.apiKey) });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         return (data.data || []).filter(m => isImageModel(m.id)).map(m => m.id);
@@ -2864,7 +2900,7 @@ async function fetchUrlAsDataUrl(url) {
 
 async function generateImageOpenAI(prompt, style, referenceImages = [], options = {}) {
     const settings = getSettings();
-    const endpoint = settings.endpoint.replace(/\/$/, '');
+    const endpoint = normalizeApiEndpoint(settings.endpoint);
     const model = settings.model;
     const aspectRatio = settings.aspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.aspectRatio || '1:1');
     const imageSize = options.imageSize || settings.imageSize || '1K';
@@ -2904,7 +2940,7 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
 
     const url = `${endpoint}/v1/chat/completions`;
     iigLog('INFO', `OpenAI chat.completions: model=${model}, ratio=${aspectRatio}, size=${imageSize}, refs=${imgCount}`);
-    const response = await robustFetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${settings.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(settings.apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
     if (!response.ok) { const text = await response.text(); throw new Error(`API Error (${response.status}): ${text}`); }
     const result = await response.json();
     const found = extractImageFromChatResponse(result);
@@ -2961,7 +2997,7 @@ function extractImageFromChatResponse(result) {
 async function generateImageGemini(prompt, style, referenceImages = [], options = {}) {
     const settings = getSettings();
     const model = settings.model;
-    const url = `${settings.endpoint.replace(/\/$/, '')}/v1beta/models/${model}:generateContent`;
+    const url = `${normalizeApiEndpoint(settings.endpoint)}/v1beta/models/${model}:generateContent`;
     let aspectRatio = settings.aspectRatio === 'auto' ? (options.aspectRatio || '1:1') : (settings.aspectRatio || '1:1');
     if (!VALID_ASPECT_RATIOS.includes(aspectRatio)) aspectRatio = '1:1';
     let imageSize = options.imageSize || settings.imageSize || '1K';
@@ -3005,7 +3041,7 @@ async function generateImageGemini(prompt, style, referenceImages = [], options 
     const body = { contents: [{ role: 'user', parts }], generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig: { aspectRatio, imageSize } } };
     iigLog('INFO', `Gemini: model=${model}, ratio=${aspectRatio}, size=${imageSize}, refs=${referenceImages.length}`);
 
-    const response = await robustFetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${settings.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(settings.apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
     if (!response.ok) { const text = await response.text(); throw new Error(`API Error (${response.status}): ${text}`); }
     const result = await response.json();
     const candidates = result.candidates || [];
@@ -3043,7 +3079,7 @@ async function generateImageNaistera(prompt, style, options = {}) {
 
     let response;
     try {
-        response = await robustFetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${settings.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(settings.apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
     } catch (error) {
         const pageOrigin = window.location.origin;
         let endpointOrigin = endpoint;
@@ -4164,6 +4200,7 @@ function createSettingsUI() {
                     <!-- API -->
                 <div class="iig-section">
                     <h4><i class="fa-solid fa-plug"></i> API</h4>
+                    <div class="flex-row"><label>Профиль</label><div class="flex1" style="display:flex;gap:6px;min-width:0;"><select id="slay_conn_profile" class="flex1" style="min-width:0;"><option value="">— профили подключений —</option></select><div id="slay_conn_profile_save" class="menu_button" title="Сохранить текущее подключение как профиль"><i class="fa-solid fa-floppy-disk"></i></div><div id="slay_conn_profile_delete" class="menu_button" title="Удалить выбранный профиль"><i class="fa-solid fa-trash-can"></i></div></div></div>
                     <div class="flex-row"><label>Тип API</label><select id="slay_api_type" class="flex1"><option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-compatible</option><option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-compatible</option><option value="naistera" ${settings.apiType === 'naistera' ? 'selected' : ''}>Naistera</option></select></div>
                     <div class="flex-row"><label>Endpoint</label><input type="text" id="slay_endpoint" class="text_pole flex1" value="${sanitizeForHtml(settings.endpoint)}" placeholder="${getEndpointPlaceholder(settings.apiType)}"></div>
                     <div class="flex-row"><label>API Key</label><input type="password" id="slay_api_key" class="text_pole flex1" value="${sanitizeForHtml(settings.apiKey)}"><div id="slay_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
@@ -5126,6 +5163,80 @@ function bindSettingsEvents() {
 
     document.getElementById('slay_enabled')?.addEventListener('change', (e) => { settings.enabled = e.target.checked; saveSettings(); updateVisibility(); updateHeaderStatusDot(); });
     document.getElementById('slay_external_blocks')?.addEventListener('change', (e) => { settings.externalBlocks = e.target.checked; saveSettings(); });
+
+    // ── Connection profiles ──
+    // Saved {name, apiType, endpoint, apiKey, model} snapshots. Applying one
+    // copies its fields into live settings + syncs the visible inputs.
+    const getConnProfiles = () => {
+        if (!Array.isArray(settings.connectionProfiles)) settings.connectionProfiles = [];
+        return settings.connectionProfiles;
+    };
+    const renderConnProfiles = (selectedName = '') => {
+        const sel = document.getElementById('slay_conn_profile');
+        if (!sel) return;
+        const profiles = getConnProfiles();
+        sel.innerHTML = '<option value="">— профили подключений —</option>';
+        for (const p of profiles) {
+            const o = document.createElement('option');
+            o.value = p.name;
+            o.textContent = p.name;
+            if (p.name === selectedName) o.selected = true;
+            sel.appendChild(o);
+        }
+    };
+    renderConnProfiles();
+    document.getElementById('slay_conn_profile')?.addEventListener('change', (e) => {
+        const name = e.target.value;
+        if (!name) return;
+        const p = getConnProfiles().find(x => x.name === name);
+        if (!p) return;
+        settings.apiType = p.apiType || 'openai';
+        settings.endpoint = p.endpoint || '';
+        settings.apiKey = p.apiKey || '';
+        settings.model = p.model || '';
+        saveSettings();
+        // Sync visible inputs to the applied profile
+        const typeSel = document.getElementById('slay_api_type');
+        if (typeSel) typeSel.value = settings.apiType;
+        const epInput = document.getElementById('slay_endpoint');
+        if (epInput) epInput.value = settings.endpoint;
+        const keyInput = document.getElementById('slay_api_key');
+        if (keyInput) keyInput.value = settings.apiKey;
+        const modelInput = document.getElementById('slay_model');
+        if (modelInput) modelInput.value = settings.model;
+        updateVisibility();
+        toastr.success(`Профиль «${name}» применён`, 'SLAY Images', { timeOut: 2000 });
+    });
+    document.getElementById('slay_conn_profile_save')?.addEventListener('click', () => {
+        const defaultName = settings.model || settings.endpoint?.replace(/^https?:\/\//, '').split('/')[0] || 'профиль';
+        const name = (window.prompt('Имя профиля:', defaultName) || '').trim();
+        if (!name) return;
+        const profiles = getConnProfiles();
+        const snapshot = {
+            name,
+            apiType: settings.apiType,
+            endpoint: settings.endpoint,
+            apiKey: settings.apiKey,
+            model: settings.model,
+        };
+        const existing = profiles.findIndex(x => x.name === name);
+        if (existing >= 0) profiles[existing] = snapshot;
+        else profiles.push(snapshot);
+        saveSettings();
+        renderConnProfiles(name);
+        toastr.success(`Профиль «${name}» сохранён`, 'SLAY Images', { timeOut: 2000 });
+    });
+    document.getElementById('slay_conn_profile_delete')?.addEventListener('click', () => {
+        const sel = document.getElementById('slay_conn_profile');
+        const name = sel?.value;
+        if (!name) { toastr.info('Выберите профиль для удаления', 'SLAY Images', { timeOut: 2000 }); return; }
+        if (!window.confirm(`Удалить профиль «${name}»?`)) return;
+        settings.connectionProfiles = getConnProfiles().filter(x => x.name !== name);
+        saveSettings();
+        renderConnProfiles();
+        toastr.info(`Профиль «${name}» удалён`, 'SLAY Images', { timeOut: 2000 });
+    });
+
     document.getElementById('slay_api_type')?.addEventListener('change', (e) => {
         const next = e.target.value;
         const endpointInput = document.getElementById('slay_endpoint');
@@ -5134,7 +5245,10 @@ function bindSettingsEvents() {
         settings.apiType = next; saveSettings(); updateVisibility();
     });
     document.getElementById('slay_endpoint')?.addEventListener('input', (e) => { settings.endpoint = e.target.value; saveSettings(); });
-    document.getElementById('slay_api_key')?.addEventListener('input', (e) => { settings.apiKey = e.target.value; saveSettings(); });
+    // sanitizeApiKey strips zero-width unicode + NBSP that ride in from
+    // clipboard (esp. Telegram) and would otherwise crash fetch with
+    // "String contains non ISO-8859-1 code point".
+    document.getElementById('slay_api_key')?.addEventListener('input', (e) => { settings.apiKey = sanitizeApiKey(e.target.value); saveSettings(); });
     document.getElementById('slay_key_toggle')?.addEventListener('click', () => {
         const input = document.getElementById('slay_api_key'); const icon = document.querySelector('#slay_key_toggle i');
         if (input.type === 'password') { input.type = 'text'; icon.classList.replace('fa-eye', 'fa-eye-slash'); } else { input.type = 'password'; icon.classList.replace('fa-eye-slash', 'fa-eye'); }
@@ -5253,7 +5367,7 @@ function bindSettingsEvents() {
     });
     document.getElementById('slay_sw_describe_key')?.addEventListener('input', (e) => {
         const s = SillyTavern.getContext().extensionSettings.slay_wardrobe_preview;
-        if (s) { s.describeKey = e.target.value; SillyTavern.getContext().saveSettingsDebounced(); }
+        if (s) { s.describeKey = sanitizeApiKey(e.target.value); SillyTavern.getContext().saveSettingsDebounced(); }
     });
     document.getElementById('slay_sw_describe_key_toggle')?.addEventListener('click', () => {
         const input = document.getElementById('slay_sw_describe_key'); const icon = document.querySelector('#slay_sw_describe_key_toggle i');
@@ -5268,11 +5382,11 @@ function bindSettingsEvents() {
         try {
             const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe_preview || {};
             const iigS = SillyTavern.getContext().extensionSettings[MODULE_NAME] || {};
-            const ep = (swS.describeEndpoint || iigS.endpoint || '').replace(/\/$/, '');
+            const ep = normalizeApiEndpoint(swS.describeEndpoint || iigS.endpoint || '');
             const key = swS.describeKey || iigS.apiKey || '';
             if (!ep || !key) throw new Error('Укажите endpoint и API key');
             const url = `${ep}/v1/models`;
-            const resp = await fetch(url, { method: 'GET', headers: { 'Authorization': `Bearer ${key}` } });
+            const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key) });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             const models = (data.data || []).map(m => m.id).sort();
@@ -5295,11 +5409,11 @@ function bindSettingsEvents() {
         try {
             const swS = SillyTavern.getContext().extensionSettings.slay_wardrobe_preview || {};
             const iigS = SillyTavern.getContext().extensionSettings[MODULE_NAME] || {};
-            const ep = (swS.describeEndpoint || iigS.endpoint || '').replace(/\/$/, '');
+            const ep = normalizeApiEndpoint(swS.describeEndpoint || iigS.endpoint || '');
             const key = swS.describeKey || iigS.apiKey || '';
             if (!ep || !key) throw new Error('Укажите endpoint и API key');
             const url = `${ep}/v1/models`;
-            const resp = await fetch(url, { method: 'GET', headers: { 'Authorization': `Bearer ${key}` } });
+            const resp = await fetch(url, { method: 'GET', headers: buildAuthHeaders(key) });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
             const count = (data.data || []).length;
