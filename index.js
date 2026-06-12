@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.3.0-preview.18';
+const SLAY_VERSION = '4.3.0-preview.19';
 // 🧪 PREVIEW BUILD — isolated storage. Main 4.2.x settings & outfits are
 // untouched; preview keys (slay_wardrobe_preview, slay_image_gen_preview)
 // are seeded once from main on first run (see init at bottom of file).
@@ -5497,20 +5497,28 @@ function initLightbox() {
     overlay.addEventListener('pointerup', stop);
     overlay.addEventListener('mousedown', stop);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlay.classList.contains('open')) close(); });
+    // DIAGNOSTIC build (preview.19): every chat click that involves an <img>
+    // logs WHY the lightbox did or didn't open. Strip the logs once the
+    // "can't click image after edit/swipe" report is solved.
     document.getElementById('chat')?.addEventListener('click', (e) => {
-        // Match either the runtime-applied class (fresh generation) OR the
-        // persistent data-iig-instruction attribute that survives edit
-        // re-renders. The class is lost when ST rebuilds the img from
-        // message.mes — bot templates don't include the class, only the
-        // data attribute. Skip when the click landed on the regen button.
-        if (e.target.closest('.iig-regen-btn')) return;
+        const dbg = (reason, extra = '') => {
+            if (e.target.tagName === 'IMG' || e.target.closest('img')) {
+                console.log(`[IIG-LB] click: ${reason}`, extra,
+                    'target=', e.target.tagName + '.' + String(e.target.className).slice(0, 60));
+            }
+        };
+        if (e.target.closest('.iig-regen-btn')) { dbg('skip: regen button'); return; }
         const img = e.target.closest('img.iig-generated-image, img[data-iig-instruction]');
-        if (!img || img.tagName !== 'IMG') return;
-        // Skip error placeholders — they have their own retry button.
-        if (img.classList.contains('iig-error-image') || img.closest('.iig-error-placeholder')) return;
-        // Skip imgs whose src is still the placeholder / error path.
+        if (!img || img.tagName !== 'IMG') {
+            dbg('skip: selector no match', e.target.closest('img')
+                ? `img present but: class="${String(e.target.closest('img').className).slice(0, 60)}" instr=${e.target.closest('img').hasAttribute('data-iig-instruction')}`
+                : 'no img in path');
+            return;
+        }
+        if (img.classList.contains('iig-error-image') || img.closest('.iig-error-placeholder')) { dbg('skip: error placeholder'); return; }
         const src = img.getAttribute('src') || '';
-        if (!src || src.includes('[IMG:GEN]') || src.includes('error.svg') || src.includes('[IMG:ERROR')) return;
+        if (!src || src.includes('[IMG:GEN]') || src.includes('error.svg') || src.includes('[IMG:ERROR')) { dbg('skip: placeholder src', src.slice(0, 80)); return; }
+        dbg('OPEN lightbox', src.slice(0, 80));
         e.preventDefault(); e.stopPropagation();
         overlay.querySelector('.iig-lightbox-img').src = img.src;
         overlay.querySelector('.iig-lightbox-caption').textContent = img.alt || '';
