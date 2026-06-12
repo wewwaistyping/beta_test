@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.3.0-preview.19';
+const SLAY_VERSION = '4.3.0-preview.22';
 // 🧪 PREVIEW BUILD — isolated storage. Main 4.2.x settings & outfits are
 // untouched; preview keys (slay_wardrobe_preview, slay_image_gen_preview)
 // are seeded once from main on first run (see init at bottom of file).
@@ -3111,6 +3111,35 @@ function validateSettings() {
 
 function sanitizeForHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
 
+// ── ST-native popups (with window.prompt/confirm fallback for old builds) ──
+// callGenericPopup lives in ST's popup.js and renders the same themed dialog
+// the rest of the UI uses. POPUP_TYPE: TEXT=1, CONFIRM=2, INPUT=3 (hardcoded
+// fallback numbers for ST builds that don't export POPUP_TYPE on the context).
+async function slayPromptInput(title, defaultValue = '') {
+    const ctx = SillyTavern.getContext();
+    try {
+        if (typeof ctx.callGenericPopup === 'function') {
+            const INPUT = ctx.POPUP_TYPE?.INPUT ?? 3;
+            const res = await ctx.callGenericPopup(title, INPUT, String(defaultValue));
+            return (typeof res === 'string') ? res : null; // false/null/undefined = cancelled
+        }
+    } catch (e) { iigLog('WARN', 'callGenericPopup(INPUT) failed, falling back to prompt:', e.message); }
+    const v = window.prompt(title, String(defaultValue));
+    return v === null ? null : v;
+}
+
+async function slayConfirm(text) {
+    const ctx = SillyTavern.getContext();
+    try {
+        if (typeof ctx.callGenericPopup === 'function') {
+            const CONFIRM = ctx.POPUP_TYPE?.CONFIRM ?? 2;
+            const res = await ctx.callGenericPopup(text, CONFIRM);
+            return res === true || res === 1; // POPUP_RESULT.AFFIRMATIVE === 1
+        }
+    } catch (e) { iigLog('WARN', 'callGenericPopup(CONFIRM) failed, falling back to confirm:', e.message); }
+    return window.confirm(text);
+}
+
 function isGeneratedVideoResult(value) {
     return Boolean(value) && typeof value === 'object' && value.kind === 'video' && typeof value.dataUrl === 'string';
 }
@@ -3165,6 +3194,79 @@ function replaceImageSrcEverywhere(message, oldSrc, newSrc) {
         }
     }
     return changed;
+}
+
+// ── Src remap: self-healing for resurrected stale image paths ──
+// ST stores message text in multiple places (mes, display_text, extblocks,
+// swipes, swipe_info) and edit/swipe/reload can re-render from ANY of them.
+// We patch all the stores we know about on regen, but third-party regex
+// scripts and presets can keep their own copies we can't reach. Instead of
+// chasing every store, remember every regen as oldSrc→newSrc in localStorage
+// and FIX THE DOM (and the message stores) whenever a stale src resurfaces.
+const IIG_SRC_REMAP_KEY = 'slay_iig_src_remap_v1';
+const IIG_SRC_REMAP_MAX = 200;
+
+function loadSrcRemap() {
+    try { return JSON.parse(localStorage.getItem(IIG_SRC_REMAP_KEY) || '{}') || {}; }
+    catch (e) { return {}; }
+}
+
+function recordSrcRemap(oldSrc, newSrc) {
+    // Only map real generated files. error.svg / [IMG:GEN] are shared
+    // placeholders — mapping those would redirect EVERY error to one image.
+    if (!oldSrc || !newSrc || oldSrc === newSrc) return;
+    if (!oldSrc.includes('/user/images/') || !newSrc.includes('/user/images/')) return;
+    try {
+        const map = loadSrcRemap();
+        // Collapse chains: if something already maps to oldSrc, point it at newSrc
+        for (const k of Object.keys(map)) { if (map[k] === oldSrc) map[k] = newSrc; }
+        map[oldSrc] = newSrc;
+        const keys = Object.keys(map);
+        if (keys.length > IIG_SRC_REMAP_MAX) {
+            for (const k of keys.slice(0, keys.length - IIG_SRC_REMAP_MAX)) delete map[k];
+        }
+        localStorage.setItem(IIG_SRC_REMAP_KEY, JSON.stringify(map));
+    } catch (e) { /* localStorage full/blocked — self-heal just won't persist */ }
+}
+
+function resolveSrcRemap(src) {
+    if (!src || !src.includes('/user/images/')) return src;
+    const map = loadSrcRemap();
+    let current = src;
+    for (let hops = 0; hops < 10; hops++) {
+        const next = map[current];
+        if (!next || next === current) break;
+        current = next;
+    }
+    return current;
+}
+
+// Walk all chat images; any whose src was superseded by a regen gets updated
+// in-place (DOM) and re-patched into the message stores. Called from the same
+// rebind hooks that re-attach regen buttons after edits/swipes/reloads.
+function healStaleImageSrcs(root) {
+    if (!root) return;
+    const imgs = root.querySelectorAll('img[src*="/user/images/"]');
+    if (!imgs.length) return;
+    const ctx = SillyTavern.getContext();
+    let healed = 0;
+    for (const img of imgs) {
+        const cur = img.getAttribute('src') || '';
+        const fixed = resolveSrcRemap(cur);
+        if (fixed === cur) continue;
+        img.setAttribute('src', fixed);
+        img.src = fixed;
+        healed++;
+        const mesEl = img.closest('.mes');
+        const messageId = mesEl ? parseInt(mesEl.getAttribute('mesid'), 10) : NaN;
+        const message = (Number.isInteger(messageId) && ctx?.chat) ? ctx.chat[messageId] : null;
+        if (message) {
+            const replaced = replaceImageSrcEverywhere(message, cur, fixed);
+            if (replaced) ctx.saveChatDebounced?.();
+        }
+        iigLog('INFO', `Src heal: ${cur.slice(-40)} -> ${fixed.slice(-40)}`);
+    }
+    if (healed) iigLog('INFO', `healStaleImageSrcs: fixed ${healed} stale image(s)`);
 }
 
 // Find a currently-in-DOM <img> with the same data-iig-instruction as the given element.
@@ -3299,6 +3401,11 @@ function attachRegenButton(imgEl) {
                 // Success path — apply new src and persist everywhere
                 liveImg.setAttribute('src', newImagePath);
                 liveImg.src = newImagePath;
+                // Remember the supersession PERSISTENTLY. Even if some store we
+                // can't reach (preset regex copies, display_text rebuilt by other
+                // extensions) resurrects the old src on a future re-render, the
+                // heal pass will swap it back to this new one on sight.
+                recordSrcRemap(origSrcAttr, newImagePath);
                 if (message && origSrcAttr) {
                     const replaced = replaceImageSrcEverywhere(message, origSrcAttr, newImagePath);
                     if (replaced) {
@@ -3347,6 +3454,11 @@ function attachRegenButton(imgEl) {
 // Safe to call on already-bound images (attachRegenButton is idempotent).
 function attachRegenButtonsInRoot(root) {
     if (!root) return;
+
+    // ZEROTH: self-heal any resurrected stale srcs (superseded by a regen).
+    // Runs before everything else so the rest of this pass — and the user —
+    // sees the current image, not whatever stale store ST re-rendered from.
+    try { healStaleImageSrcs(root); } catch (e) { iigLog('WARN', 'healStaleImageSrcs failed:', e.message); }
 
     // FIRST: rehydrate any stale error-img remnants. They may be <img src="error.svg">
     // OR the same img wrapped into a <span class="iig-img-wrap"> (if some earlier pass
@@ -5207,9 +5319,10 @@ function bindSettingsEvents() {
         updateVisibility();
         toastr.success(`Профиль «${name}» применён`, 'SLAY Images', { timeOut: 2000 });
     });
-    document.getElementById('slay_conn_profile_save')?.addEventListener('click', () => {
+    document.getElementById('slay_conn_profile_save')?.addEventListener('click', async () => {
         const defaultName = settings.model || settings.endpoint?.replace(/^https?:\/\//, '').split('/')[0] || 'профиль';
-        const name = (window.prompt('Имя профиля:', defaultName) || '').trim();
+        const raw = await slayPromptInput('Имя профиля подключения:', defaultName);
+        const name = (raw || '').trim();
         if (!name) return;
         const profiles = getConnProfiles();
         const snapshot = {
@@ -5226,11 +5339,11 @@ function bindSettingsEvents() {
         renderConnProfiles(name);
         toastr.success(`Профиль «${name}» сохранён`, 'SLAY Images', { timeOut: 2000 });
     });
-    document.getElementById('slay_conn_profile_delete')?.addEventListener('click', () => {
+    document.getElementById('slay_conn_profile_delete')?.addEventListener('click', async () => {
         const sel = document.getElementById('slay_conn_profile');
         const name = sel?.value;
         if (!name) { toastr.info('Выберите профиль для удаления', 'SLAY Images', { timeOut: 2000 }); return; }
-        if (!window.confirm(`Удалить профиль «${name}»?`)) return;
+        if (!(await slayConfirm(`Удалить профиль «${name}»?`))) return;
         settings.connectionProfiles = getConnProfiles().filter(x => x.name !== name);
         saveSettings();
         renderConnProfiles();
@@ -5497,34 +5610,54 @@ function initLightbox() {
     overlay.addEventListener('pointerup', stop);
     overlay.addEventListener('mousedown', stop);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlay.classList.contains('open')) close(); });
-    // DIAGNOSTIC build (preview.19): every chat click that involves an <img>
-    // logs WHY the lightbox did or didn't open. Strip the logs once the
-    // "can't click image after edit/swipe" report is solved.
-    document.getElementById('chat')?.addEventListener('click', (e) => {
-        const dbg = (reason, extra = '') => {
-            if (e.target.tagName === 'IMG' || e.target.closest('img')) {
-                console.log(`[IIG-LB] click: ${reason}`, extra,
-                    'target=', e.target.tagName + '.' + String(e.target.className).slice(0, 60));
-            }
-        };
-        if (e.target.closest('.iig-regen-btn')) { dbg('skip: regen button'); return; }
-        const img = e.target.closest('img.iig-generated-image, img[data-iig-instruction]');
-        if (!img || img.tagName !== 'IMG') {
-            dbg('skip: selector no match', e.target.closest('img')
-                ? `img present but: class="${String(e.target.closest('img').className).slice(0, 60)}" instr=${e.target.closest('img').hasAttribute('data-iig-instruction')}`
-                : 'no img in path');
-            return;
-        }
-        if (img.classList.contains('iig-error-image') || img.closest('.iig-error-placeholder')) { dbg('skip: error placeholder'); return; }
+    // Lightbox click — bound on DOCUMENT with capture:true, not on #chat.
+    // Failure modes the old #chat-bubble listener died to:
+    //   1. ST re-creating #chat orphans listeners on the old element.
+    //   2. Third-party stopPropagation in bubble eats the event.
+    //   3. The visible <img> not being in the event path at all (covered by
+    //      an overlay, or pointer-events tricks) — solved by elementsFromPoint
+    //      fallback below: we look for an img directly under the click point.
+    // Eligibility is now src-based (/user/images/) OR marker-based — presets
+    // and regex scripts can strip our class/attribute from the tag, but the
+    // generated file path always survives (it IS what's being displayed).
+    const isOurImage = (img) => {
+        if (!img || img.tagName !== 'IMG') return false;
+        if (img.classList.contains('iig-error-image') || img.closest('.iig-error-placeholder')) return false;
         const src = img.getAttribute('src') || '';
-        if (!src || src.includes('[IMG:GEN]') || src.includes('error.svg') || src.includes('[IMG:ERROR')) { dbg('skip: placeholder src', src.slice(0, 80)); return; }
-        dbg('OPEN lightbox', src.slice(0, 80));
+        if (!src || src.includes('[IMG:GEN]') || src.includes('error.svg') || src.includes('[IMG:ERROR')) return false;
+        return src.includes('/user/images/')
+            || img.classList.contains('iig-generated-image')
+            || img.hasAttribute('data-iig-instruction');
+    };
+    document.addEventListener('click', (e) => {
+        if (e.target.closest?.('.iig-regen-btn')) return;
+        if (overlay.classList.contains('open')) return; // lightbox itself is up
+        // 1) Normal path: img is in the event path
+        let img = e.target.tagName === 'IMG' ? e.target : e.target.closest?.('img');
+        // 2) Fallback: click landed on something covering the img — probe
+        //    everything under the pointer coordinates. GATED to clicks whose
+        //    actual target is inside #chat: without the gate, a click on the
+        //    settings drawer / any panel rendered ABOVE the chat would x-ray
+        //    through the UI to a chat image underneath and open the lightbox
+        //    (reported: clicking "save profile" opened the image behind the
+        //    drawer). Overlays that legitimately cover a chat image (regen
+        //    overlay, bot-template divs) all live inside #chat, so the gate
+        //    keeps the fallback working for them.
+        if ((!img || !isOurImage(img))
+            && e.target.closest?.('#chat')
+            && typeof document.elementsFromPoint === 'function') {
+            const under = document.elementsFromPoint(e.clientX, e.clientY);
+            img = under.find(el => el.tagName === 'IMG' && isOurImage(el)) || img;
+        }
+        if (!img || !isOurImage(img)) return;
+        if (!img.closest('#chat')) return; // only chat images
+        console.log('[IIG-LB] OPEN', (img.getAttribute('src') || '').slice(-60));
         e.preventDefault(); e.stopPropagation();
         overlay.querySelector('.iig-lightbox-img').src = img.src;
         overlay.querySelector('.iig-lightbox-caption').textContent = img.alt || '';
         overlay.classList.add('open');
         document.body.style.overflow = 'hidden'; // Prevent background scroll on iOS
-    });
+    }, { capture: true });
 }
 
 function updateHeaderStatusDot() {
