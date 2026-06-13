@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.3.0-preview.23';
+const SLAY_VERSION = '4.3.0-preview.24';
 // 🧪 PREVIEW BUILD — isolated storage. Main 4.2.x settings & outfits are
 // untouched; preview keys (slay_wardrobe_preview, slay_image_gen_preview)
 // are seeded once from main on first run (see init at bottom of file).
@@ -2779,7 +2779,16 @@ async function fetchModels() {
         const response = await fetch(url, { method: 'GET', headers: buildAuthHeaders(settings.apiKey) });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        return (data.data || []).filter(m => isImageModel(m.id)).map(m => m.id);
+        const all = (data.data || []).map(m => m.id).filter(Boolean);
+        // DON'T hard-filter by isImageModel() — the keyword whitelist drops
+        // legit models the user needs (recraft, custom proxy aliases, anything
+        // new). Instead surface ALL models with the likely-image ones sorted
+        // first so they're easy to pick, and the rest still available below.
+        const imageLikely = [];
+        const rest = [];
+        for (const id of all) (isImageModel(id) ? imageLikely : rest).push(id);
+        imageLikely.sort(); rest.sort();
+        return [...imageLikely, ...rest];
     } catch (error) { console.error('[IIG] fetchModels failed:', error); toastr.error(`Ошибка загрузки моделей: ${error.message}`, 'SLAY Images'); return []; }
 }
 
