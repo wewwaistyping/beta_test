@@ -4,7 +4,7 @@
  * gallery update by hydall (https://github.com/hydall)
  * based on sillyimages by 0xl0cal and aceeenvw's NPC system
  */
-const SLAY_VERSION = '4.3.0-preview.22';
+const SLAY_VERSION = '4.3.0-preview.23';
 // 🧪 PREVIEW BUILD — isolated storage. Main 4.2.x settings & outfits are
 // untouched; preview keys (slay_wardrobe_preview, slay_image_gen_preview)
 // are seeded once from main on first run (see init at bottom of file).
@@ -1976,6 +1976,10 @@ const defaultSettings = Object.freeze({
     // Applying a profile copies its fields into the live settings — it's a
     // snapshot, not a live link; later edits don't write back to the profile.
     connectionProfiles: [],
+    // Custom apiType: request body shape sent to the user-supplied full URL.
+    // 'chat' = OpenAI chat/completions multimodal; 'images' = OpenAI
+    // images/generations ({prompt, size, n, response_format}).
+    customBodyFormat: 'chat',
     size: '1024x1024',
     quality: 'standard',
     maxRetries: 0,
@@ -2061,7 +2065,7 @@ function isGeminiModel(modelId) {
 // ── Naistera/endpoint helpers (from sillyimages-master) ──
 const NAISTERA_MODELS = Object.freeze(['grok', 'nano banana', 'grok-pro', 'novelai']);
 const DEFAULT_ENDPOINTS = Object.freeze({ naistera: 'https://naistera.org' });
-const ENDPOINT_PLACEHOLDERS = Object.freeze({ openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com', naistera: 'https://naistera.org' });
+const ENDPOINT_PLACEHOLDERS = Object.freeze({ openai: 'https://api.openai.com', gemini: 'https://generativelanguage.googleapis.com', naistera: 'https://naistera.org', custom: 'https://api.example.com/ai/openai/image (полный URL)' });
 
 function normalizeNaisteraModel(model) {
     const raw = String(model || '').trim().toLowerCase();
@@ -2758,6 +2762,12 @@ function buildAuthHeaders(apiKey, extra = {}) {
 
 async function fetchModels() {
     const settings = getSettings();
+    // Custom = full URL straight to a generation endpoint; appending /v1/models
+    // to it is meaningless. Model (if needed) is typed by hand.
+    if (settings.apiType === 'custom') {
+        toastr.info('Custom URL: списка моделей нет, введи имя модели вручную (или оставь пустым)', 'SLAY Images', { timeOut: 3500 });
+        return [];
+    }
     const endpoint = settings.endpoint ? normalizeApiEndpoint(settings.endpoint) : getEffectiveEndpoint(settings);
     if (!endpoint || !settings.apiKey) {
         console.warn('[IIG] Cannot fetch models: endpoint=' + endpoint + ' apiKey=' + (settings.apiKey ? 'set' : 'empty'));
@@ -2930,16 +2940,37 @@ async function generateImageOpenAI(prompt, style, referenceImages = [], options 
         fullPrompt = `${instructions.join('\n')}\nGenerate the scene below. Keep all faces and outfits faithful to the references.\n\n${fullPrompt}`;
     }
 
-    const content = [{ type: 'text', text: fullPrompt }, ...imageParts];
-    const body = {
-        model,
-        messages: [{ role: 'user', content }],
-        modalities: ['image', 'text'],
-        stream: false,
-    };
-
-    const url = `${endpoint}/v1/chat/completions`;
-    iigLog('INFO', `OpenAI chat.completions: model=${model}, ratio=${aspectRatio}, size=${imageSize}, refs=${imgCount}`);
+    // ── Custom apiType: user supplies the FULL endpoint URL, we append
+    // nothing. Body shape follows settings.customBodyFormat:
+    //   'chat'   — same multimodal chat/completions body as openai mode
+    //   'images' — DALL-E style images/generations body; this format has
+    //              no slot for reference images, they're skipped with a log
+    const isCustom = settings.apiType === 'custom';
+    let url, body;
+    if (isCustom && (settings.customBodyFormat || 'chat') === 'images') {
+        if (imgCount > 0) iigLog('WARN', `Custom images/generations: формат не поддерживает рефы — ${imgCount} шт. пропущено`);
+        url = String(settings.endpoint || '').trim().replace(/\/+$/, '');
+        body = {
+            ...(model ? { model } : {}),
+            prompt: fullPrompt,
+            n: 1,
+            size: settings.size || '1024x1024',
+            response_format: 'b64_json',
+        };
+        iigLog('INFO', `Custom images/generations: model=${model || '(default)'}, size=${body.size}, url=${url.slice(0, 60)}`);
+    } else {
+        const content = [{ type: 'text', text: fullPrompt }, ...imageParts];
+        body = {
+            ...(model ? { model } : {}),
+            messages: [{ role: 'user', content }],
+            modalities: ['image', 'text'],
+            stream: false,
+        };
+        url = isCustom
+            ? String(settings.endpoint || '').trim().replace(/\/+$/, '')
+            : `${endpoint}/v1/chat/completions`;
+        iigLog('INFO', `${isCustom ? 'Custom chat.completions' : 'OpenAI chat.completions'}: model=${model || '(default)'}, ratio=${aspectRatio}, size=${imageSize}, refs=${imgCount}`);
+    }
     const response = await robustFetch(url, { method: 'POST', headers: buildAuthHeaders(settings.apiKey, { 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
     if (!response.ok) { const text = await response.text(); throw new Error(`API Error (${response.status}): ${text}`); }
     const result = await response.json();
@@ -3101,7 +3132,8 @@ function validateSettings() {
     const errors = [];
     if (!settings.endpoint && settings.apiType !== 'naistera') errors.push('URL эндпоинта не настроен');
     if (!settings.apiKey) errors.push('API ключ не настроен');
-    if (settings.apiType !== 'naistera' && !settings.model) errors.push('Модель не выбрана');
+    // Custom endpoints often pin the model server-side — model is optional there.
+    if (settings.apiType !== 'naistera' && settings.apiType !== 'custom' && !settings.model) errors.push('Модель не выбрана');
     if (settings.apiType === 'naistera') {
         const m = normalizeNaisteraModel(settings.naisteraModel);
         if (!NAISTERA_MODELS.includes(m)) errors.push('Для Naistera выберите модель: grok / nano banana');
@@ -4313,7 +4345,9 @@ function createSettingsUI() {
                 <div class="iig-section">
                     <h4><i class="fa-solid fa-plug"></i> API</h4>
                     <div class="flex-row"><label>Профиль</label><div class="flex1" style="display:flex;gap:6px;min-width:0;"><select id="slay_conn_profile" class="flex1" style="min-width:0;"><option value="">— профили подключений —</option></select><div id="slay_conn_profile_save" class="menu_button" title="Сохранить текущее подключение как профиль"><i class="fa-solid fa-floppy-disk"></i></div><div id="slay_conn_profile_delete" class="menu_button" title="Удалить выбранный профиль"><i class="fa-solid fa-trash-can"></i></div></div></div>
-                    <div class="flex-row"><label>Тип API</label><select id="slay_api_type" class="flex1"><option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-compatible</option><option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-compatible</option><option value="naistera" ${settings.apiType === 'naistera' ? 'selected' : ''}>Naistera</option></select></div>
+                    <div class="flex-row"><label>Тип API</label><select id="slay_api_type" class="flex1"><option value="openai" ${settings.apiType === 'openai' ? 'selected' : ''}>OpenAI-compatible</option><option value="gemini" ${settings.apiType === 'gemini' ? 'selected' : ''}>Gemini-compatible</option><option value="naistera" ${settings.apiType === 'naistera' ? 'selected' : ''}>Naistera</option><option value="custom" ${settings.apiType === 'custom' ? 'selected' : ''}>Custom (свой URL)</option></select></div>
+                    <div class="flex-row ${settings.apiType === 'custom' ? '' : 'iig-hidden'}" id="slay_custom_format_row"><label>Формат запроса</label><select id="slay_custom_body_format" class="flex1"><option value="chat" ${(settings.customBodyFormat || 'chat') === 'chat' ? 'selected' : ''}>chat/completions (мультимодальный)</option><option value="images" ${settings.customBodyFormat === 'images' ? 'selected' : ''}>images/generations (DALL-E style)</option></select></div>
+                    <p class="hint ${settings.apiType === 'custom' ? '' : 'iig-hidden'}" id="slay_custom_hint">Custom: в Endpoint вставь <b>полный URL</b> конечной точки (например <i>https://api.xxx/ai/openai/image</i>) — расширение ничего не дописывает. Формат «images/generations» не поддерживает референсы (картинки-рефы не отправляются).</p>
                     <div class="flex-row"><label>Endpoint</label><input type="text" id="slay_endpoint" class="text_pole flex1" value="${sanitizeForHtml(settings.endpoint)}" placeholder="${getEndpointPlaceholder(settings.apiType)}"></div>
                     <div class="flex-row"><label>API Key</label><input type="password" id="slay_api_key" class="text_pole flex1" value="${sanitizeForHtml(settings.apiKey)}"><div id="slay_key_toggle" class="menu_button iig-key-toggle" title="Show/Hide"><i class="fa-solid fa-eye"></i></div></div>
                     <p id="slay_naistera_hint" class="hint ${settings.apiType === 'naistera' ? '' : 'iig-hidden'}">Naistera: вставьте токен из Telegram-бота.</p>
@@ -5224,8 +5258,11 @@ function bindSettingsEvents() {
         const isNaistera = apiType === 'naistera';
         const isGemini = apiType === 'gemini';
         const isOpenAI = apiType === 'openai';
+        const isCustom = apiType === 'custom';
 
         document.getElementById('slay_settings_body')?.classList.toggle('iig-hidden', !settings.enabled);
+        document.getElementById('slay_custom_format_row')?.classList.toggle('iig-hidden', !isCustom);
+        document.getElementById('slay_custom_hint')?.classList.toggle('iig-hidden', !isCustom);
 
         const currentNaisModel = normalizeNaisteraModel(settings.naisteraModel);
         const supportsRefs = !isNaistera || currentNaisModel === 'grok' || currentNaisModel === 'nano banana';
@@ -5306,6 +5343,7 @@ function bindSettingsEvents() {
         settings.endpoint = p.endpoint || '';
         settings.apiKey = p.apiKey || '';
         settings.model = p.model || '';
+        settings.customBodyFormat = p.customBodyFormat || 'chat';
         saveSettings();
         // Sync visible inputs to the applied profile
         const typeSel = document.getElementById('slay_api_type');
@@ -5316,6 +5354,8 @@ function bindSettingsEvents() {
         if (keyInput) keyInput.value = settings.apiKey;
         const modelInput = document.getElementById('slay_model');
         if (modelInput) modelInput.value = settings.model;
+        const fmtSel = document.getElementById('slay_custom_body_format');
+        if (fmtSel) fmtSel.value = settings.customBodyFormat;
         updateVisibility();
         toastr.success(`Профиль «${name}» применён`, 'SLAY Images', { timeOut: 2000 });
     });
@@ -5331,6 +5371,7 @@ function bindSettingsEvents() {
             endpoint: settings.endpoint,
             apiKey: settings.apiKey,
             model: settings.model,
+            customBodyFormat: settings.customBodyFormat || 'chat',
         };
         const existing = profiles.findIndex(x => x.name === name);
         if (existing >= 0) profiles[existing] = snapshot;
@@ -5394,6 +5435,7 @@ function bindSettingsEvents() {
         }
         catch (e) { toastr.error('Ошибка загрузки', 'SLAY Images'); } finally { btn.classList.remove('loading'); }
     });
+    document.getElementById('slay_custom_body_format')?.addEventListener('change', (e) => { settings.customBodyFormat = e.target.value; saveSettings(); });
     document.getElementById('slay_size')?.addEventListener('change', (e) => { settings.size = e.target.value; saveSettings(); });
     document.getElementById('slay_quality')?.addEventListener('change', (e) => { settings.quality = e.target.value; saveSettings(); });
     document.getElementById('slay_aspect_ratio')?.addEventListener('change', (e) => { settings.aspectRatio = e.target.value; saveSettings(); });
@@ -5437,6 +5479,14 @@ function bindSettingsEvents() {
                 const r = await fetch(testUrl, { method: 'HEAD' }).catch(() => null);
                 if (r?.ok) toastr.success('Connection OK', 'SLAY Images');
                 else toastr.warning('Endpoint ответил не-OK', 'SLAY Images');
+            } else if (currentSettings.apiType === 'custom') {
+                // Custom = full URL to a generation endpoint; there is no
+                // /v1/models to probe and a real POST would cost the user a
+                // generation. HEAD tells us at least that the host answers.
+                const testUrl = String(currentSettings.endpoint).trim().replace(/\/+$/, '');
+                const r = await fetch(testUrl, { method: 'HEAD' }).catch(() => null);
+                if (r) toastr.success(`Endpoint отвечает (HTTP ${r.status}). Полная проверка — только реальной генерацией.`, 'SLAY Images', { timeOut: 4000 });
+                else toastr.warning('Endpoint недоступен (сеть/CORS). Проверь URL.', 'SLAY Images');
             } else {
                 const models = await fetchModels();
                 if (models.length > 0) toastr.success(`Connection OK — ${models.length} моделей`, 'SLAY Images');
